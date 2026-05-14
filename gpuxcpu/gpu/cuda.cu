@@ -4,8 +4,8 @@ using namespace std;
 
 // Cada "thread" da GPU vai calcular apenas UM elemento da matriz C.
 __global__ void multiplicaKernel(float *A, float *B, float *C, int N) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y; // Linha
-    int col = blockIdx.x * blockDim.x + threadIdx.x; // Coluna
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < N && col < N) {
         float soma = 0.0f;
@@ -20,7 +20,7 @@ int main() {
     int N = 1000;
     size_t bytes = N * N * sizeof(float);
 
-    // Alocação na RAM (Host)
+    // Alocação na RAM
     float *h_A = new float[N * N];
     float *h_B = new float[N * N];
     float *h_C = new float[N * N];
@@ -28,13 +28,13 @@ int main() {
     // Preenche matrizes
     for (int i = 0; i < N * N; i++) { h_A[i] = 1.0f; h_B[i] = 1.0f; }
 
-    // Alocação na VRAM (Device - Placa de vídeo)
+    // Alocação na VRAM
     float *d_A, *d_B, *d_C;
     cudaMalloc(&d_A, bytes);
     cudaMalloc(&d_B, bytes);
     cudaMalloc(&d_C, bytes);
 
-    // Eventos CUDA para medir o tempo exigidos no PDF
+    // Eventos CUDA para medir o tempo
     cudaEvent_t inicio, fim;
     cudaEventCreate(&inicio);
     cudaEventCreate(&fim);

@@ -16,7 +16,7 @@ void multiplicaSequencial(float *A, float *B, float *C, int N) {
 }
 
 int main() {
-    int N = 1000; // Comecem testando com 1000
+    int N = 1000;
     size_t bytes = N * N * sizeof(float);
 
     // Alocação de memória no Heap (RAM)
@@ -24,7 +24,6 @@ int main() {
     float *B = new float[N * N];
     float *C = new float[N * N];
 
-    // Preenchendo com valores de exemplo (ex: 1.0)
     for (int i = 0; i < N * N; i++) {
         A[i] = 1.0f;
         B[i] = 1.0f;
