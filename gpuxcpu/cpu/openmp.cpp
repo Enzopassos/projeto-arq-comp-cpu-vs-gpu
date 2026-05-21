@@ -1,15 +1,25 @@
+// openmp.cpp
 #include <omp.h>
+#include "openmp.h"
 
+// Versão otimizada (i-k-j) aproveitando localidade de cache e vetorização
 void multiplicaOpenMP(float *A, float *B, float *C, int N) {
-    // Essa linha diz ao compilador para paralelizar os dois primeiros 'for'
-    #pragma omp parallel for collapse(2)
+    // Inicializa a matriz C com zeros de forma paralela
+    #pragma omp parallel for
+    for (int i = 0; i < N * N; i++) {
+        C[i] = 0.0f;
+    }
+
+    // Multiplicação otimizada com a ordem i-k-j
+    #pragma omp parallel for 
     for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++) {
-            float soma = 0.0f;
-            for (int k = 0; k < N; k++) {
-                soma += A[i * N + k] * B[k * N + j];
+        for (int k = 0; k < N; k++) {
+            float a_temp = A[i * N + k]; 
+            
+            #pragma omp simd
+            for (int j = 0; j < N; j++) {
+                C[i * N + j] += a_temp * B[k * N + j];
             }
-            C[i * N + j] = soma;
         }
     }
 }
