@@ -19,11 +19,14 @@ def main():
 
     # Calcular Speedups
     df['Speedup_OMP'] = df['CPU_Seq_ms'] / df['CPU_OMP_ms']
+    if 'CPU_Manual_ms' in df.columns:
+        df['Speedup_Manual'] = df['CPU_Seq_ms'] / df['CPU_Manual_ms']
     df['Speedup_GPU_Naive'] = df['CPU_Seq_ms'] / df['GPU_Naive_Total_ms']
     df['Speedup_GPU_Tiled'] = df['CPU_Seq_ms'] / df['GPU_Tiled_Total_ms']
 
     c_seq = "#2C3E50"   
     c_omp = "#3498DB"   
+    c_manual = "#9B59B6" # Roxo para CPU Manual (AVX2 + Threads)
     c_naive = "#E67E22"  
     c_tiled = "#2ECC71"  
     c_pcie = "#E74C3C"   
@@ -43,6 +46,8 @@ def main():
 
     plt.plot(df['N'], df['CPU_Seq_ms'], marker='o', color=c_seq, linewidth=2.5, label='CPU Sequencial')
     plt.plot(df['N'], df['CPU_OMP_ms'], marker='s', color=c_omp, linewidth=2.5, label='CPU OpenMP')
+    if 'CPU_Manual_ms' in df.columns:
+        plt.plot(df['N'], df['CPU_Manual_ms'], marker='p', color=c_manual, linewidth=2.5, label='CPU Manual (AVX2)')
     plt.plot(df['N'], df['GPU_Naive_Total_ms'], marker='^', color=c_naive, linewidth=2, linestyle='--', label='GPU Naive (Kernel + PCIe)')
     plt.plot(df['N'], df['GPU_Tiled_Total_ms'], marker='D', color=c_tiled, linewidth=2.5, label='GPU Tiled (Kernel + PCIe)')
 
@@ -62,6 +67,8 @@ def main():
     plt.grid(True, which="both", linestyle="--", alpha=0.5)
 
     plt.plot(df['N'], df['Speedup_OMP'], marker='s', color=c_omp, linewidth=2.5, label='Speedup CPU OpenMP')
+    if 'Speedup_Manual' in df.columns:
+        plt.plot(df['N'], df['Speedup_Manual'], marker='p', color=c_manual, linewidth=2.5, label='Speedup CPU AVX2')
     plt.plot(df['N'], df['Speedup_GPU_Naive'], marker='^', color=c_naive, linewidth=2, linestyle='--', label='Speedup GPU Naive')
     plt.plot(df['N'], df['Speedup_GPU_Tiled'], marker='D', color=c_tiled, linewidth=2.5, label='Speedup GPU Tiled')
 

@@ -1,306 +1,238 @@
+// main.cu
+// Orquestrador principal do benchmark CPU vs GPU.
+// Responsável por: parse de argumentos, detecção de hardware, alocação de memória,
+// coordenação das baterias de testes e exportação dos resultados em CSV.
 #include <iostream>
 #include <iomanip>
 #include <vector>
-#include <chrono>
-#include <cmath>
-#include <fstream>
 #include <string>
+#include <fstream>
+#include <cstring>
+#include <algorithm>
+#include <intrin.h>
 #include <cuda_runtime.h>
-#include "kernels.h"
-#include "../cpu/sequencial.h"
-#include "../cpu/openmp.h"
+
+#include "../common.h"
+#include "gpu_benchmark.h"
+#include "../cpu/cpu_benchmark.h"
+#include "../cpu/openmp.h"  // Para geração da referência de validação no modo --mode gpu
 
 using namespace std;
 
-struct ResResultados {
-    int N;
-    double t_cpu_seq;
-    double t_cpu_omp;
-    float t_gpu_naive_h2d;
-    float t_gpu_naive_kernel;
-    float t_gpu_naive_d2h;
-    float t_gpu_naive_total;
-    float t_gpu_tiled_h2d;
-    float t_gpu_tiled_kernel;
-    float t_gpu_tiled_d2h;
-    float t_gpu_tiled_total;
-    bool validacao_ok;
-};
+// ============================================================
+// Detecção de Hardware
+// ============================================================
 
-// Validação dos dados
-bool validarMatrizes(float *ref, float *teste, int N) {
-    float max_diff = 0.0f;
-    for (int i = 0; i < N * N; i++) {
-        float diff = fabsf(ref[i] - teste[i]);
-        if (diff > max_diff) {
-            max_diff = diff;
-        }
-    }
-    float tolerancial_float = 1e-2f; // Tolerância segura para operações de grande escala em float
-    if (max_diff > tolerancial_float) {
-        cout << "\n[ERRO DE VALIDACAO] Diferenca maxima de " << max_diff << " detectada!\n";
-        return false;
-    }
-    return true;
+static string obterModeloCPU() {
+    int info[4] = {};
+    char brand[49] = {};
+    __cpuid(info, 0x80000002); memcpy(brand,      info, 16);
+    __cpuid(info, 0x80000003); memcpy(brand + 16, info, 16);
+    __cpuid(info, 0x80000004); memcpy(brand + 32, info, 16);
+    string s(brand);
+    size_t p = s.find_first_not_of(' ');
+    return (p != string::npos) ? s.substr(p) : s;
 }
 
-// Inicializa matriz com floats determinísticos
-void inicializarMatrizes(float *A, float *B, int N) {
+// ============================================================
+// Inicialização das matrizes com valores determinísticos
+// (garante reprodutibilidade entre execuções)
+// ============================================================
+static void inicializarMatrizes(float *A, float *B, int N) {
     for (int i = 0; i < N * N; i++) {
         A[i] = (float)(i % 100) / 100.0f + 0.5f;
         B[i] = (float)((i * 3) % 100) / 100.0f + 0.5f;
     }
 }
 
-// DRIVER DE BENCHMARK
-int main() {
-    // Semente para geração
-    srand(42);
+// ============================================================
+// Calcula número de rodadas da CPU de acordo com o tamanho N
+// para garantir que o benchmark caiba em ~30 minutos.
+// ============================================================
+static int rodadasCPU(int N, int default_runs) {
+    if (N <= 1000) return default_runs;
+    if (N <= 2000) return min(default_runs, 3);
+    return min(default_runs, 1); // N >= 5000: apenas 1 rodada
+}
 
-    // Listagem de tamanhos N definidos
-    vector<int> tamanhos = {100, 200, 500, 1000, 2000, 5000, 10000};
+// ============================================================
+// main
+// ============================================================
+int main(int argc, char *argv[]) {
+    // --- Parâmetros com valores padrão ---
+    string mode        = "all";
+    int    total_runs  = 10;
+    bool   validation  = true;
+    vector<int> sizes  = {100, 200, 500, 1000, 2000, 5000, 10000};
+
+    // --- Parse de linha de comando ---
+    for (int i = 1; i < argc; i++) {
+        string a = argv[i];
+        if      (a == "--mode"         && i+1 < argc) mode       = argv[++i];
+        else if (a == "--runs"         && i+1 < argc) total_runs = stoi(argv[++i]);
+        else if (a == "--no-validation")              validation  = false;
+        else if (a == "--sizes"        && i+1 < argc) {
+            string tok = argv[++i];
+            sizes.clear();
+            size_t pos;
+            while ((pos = tok.find(',')) != string::npos) {
+                sizes.push_back(stoi(tok.substr(0, pos)));
+                tok.erase(0, pos + 1);
+            }
+            sizes.push_back(stoi(tok));
+        }
+        else if (a == "--help" || a == "-h") {
+            cout
+                << "Uso: " << argv[0] << " [opcoes]\n\n"
+                  << "  --mode <all|cpu|gpu>        Modo de execucao (padrao: all)\n"
+                << "  --sizes <n1,n2,...>          Tamanhos N das matrizes (padrao: 100,200,500,1000,2000,5000,10000)\n"
+                << "  --runs <n>                   Repeticoes por teste (padrao: 10, reduzido automaticamente para N grande)\n"
+                << "  --no-validation              Desabilita validacao matematica GPU vs CPU\n"
+                << "  -h, --help                   Mostra esta ajuda\n\n"
+                << "Exemplos:\n"
+                << "  " << argv[0] << "                           # Benchmark completo\n"
+                << "  " << argv[0] << " --mode gpu               # Apenas GPU\n"
+                << "  " << argv[0] << " --mode cpu --sizes 1000,2000,5000\n";
+            return 0;
+        }
+    }
+
+    // Inicializa CUDA e lê nome da GPU
+    inicializarGPUDevice();
+
+    string cpu_name = obterModeloCPU();
+    string gpu_name = string(obterModeloGPU());
+
+    cout << "=========================================================================\n"
+         << "          BENCHMARK DE ARQUITETURA DE COMPUTADORES: CPU vs GPU\n"
+         << "=========================================================================\n"
+         << "Hardware Detectado:\n"
+         << "  - CPU : " << cpu_name << "\n"
+         << "  - GPU : " << gpu_name << "\n"
+         << "=========================================================================\n"
+         << "Configuracoes:\n"
+         << "  - Modo            : " << mode       << "\n"
+         << "  - Repeticoes GPU  : " << total_runs << "\n"
+         << "  - Validacao       : " << (validation ? "Ativa" : "Inativa") << "\n"
+         << "=========================================================================\n\n";
+
     vector<ResResultados> resultados;
 
-    cout << "=========================================================================\n";
-    cout << "          BENCHMARK DE ARQUITETURA DE COMPUTADORES: CPU vs GPU\n";
-    cout << "=========================================================================\n";
-    cout << "Hardware Alvo:\n";
-    cout << "  - CPU: AMD Zen 3 (Sequencial & OpenMP Multithreaded)\n";
-    cout << "  - GPU: NVIDIA Ampere/Ada Lovelace (CUDA Naive & Tiled Shared Memory)\n";
-    cout << "=========================================================================\n";
-    cout << "Metodologia Cientifica:\n";
-    cout << "  - Rigor estatistico total: Exatamente 10 execucoes por teste.\n";
-    cout << "  - Calculo de Media Aritmetica pura de todos os tempos.\n";
-    cout << "=========================================================================\n\n";
+    for (int N : sizes) {
+        size_t bytes = (size_t)N * N * sizeof(float);
+        cout << ">>> INICIANDO TESTES PARA N = " << N
+             << "  (" << (double)bytes / (1024.0 * 1024.0) << " MB por matriz)\n";
 
-    for (int N : tamanhos) {
-        size_t bytes = N * N * sizeof(float);
-        cout << ">>> INICIANDO TESTES PARA TAMANHO N = " << N << " (" << (double)bytes / (1024 * 1024) << " MB por matriz)\n";
+        // Aloca matrizes de entrada como pinned memory (otimiza transferências PCIe)
+        float *h_A = nullptr, *h_B = nullptr;
+        cudaMallocHost(&h_A, bytes);
+        cudaMallocHost(&h_B, bytes);
 
-        const int total_runs = 10;
-
-        // Alocação Host
-        float *h_A = new float[N * N];
-        float *h_B = new float[N * N];
-        float *h_C_cpu = new float[N * N];
-        float *h_C_gpu = new float[N * N];
+        // Matriz de saída para a CPU (não precisa ser pinned)
+        float *h_C = new float[N * N];
+        memset(h_C, 0, bytes);
 
         inicializarMatrizes(h_A, h_B, N);
 
-        // 1. BENCHMARK CPU SEQUENCIAL
-        double t_seq_total = 0.0;
-        cout << "  [CPU Sequencial] Rodando " << total_runs << " execucoes:\n" << flush;
-        for (int r = 0; r < total_runs; r++) {
-            cout << "    -> Execucao " << (r + 1) << "/" << total_runs << "... " << flush;
-            auto start = chrono::high_resolution_clock::now();
-            multiplicaSequencial(h_A, h_B, h_C_cpu, N);
-            auto end = chrono::high_resolution_clock::now();
-            double dur_ms = chrono::duration<double, std::milli>(end - start).count();
-            t_seq_total += dur_ms;
-            cout << fixed << setprecision(2) << dur_ms << " ms\n";
-        }
-        t_seq_total /= total_runs;
-        cout << "  [CPU Sequencial] Media Final: " << fixed << setprecision(2) << t_seq_total << " ms\n\n";
+        // Struct de resultados inicializada com zeros
+        ResResultados res{};
+        res.N           = N;
+        res.validacao_ok = true;
 
-        // 2. BENCHMARK CPU OPENMP
-        double t_omp_total = 0.0;
-        cout << "  [CPU OpenMP]     Rodando " << total_runs << " execucoes:\n" << flush;
-        for (int r = 0; r < total_runs; r++) {
-            cout << "    -> Execucao " << (r + 1) << "/" << total_runs << "... " << flush;
-            auto start = chrono::high_resolution_clock::now();
-            multiplicaOpenMP(h_A, h_B, h_C_cpu, N);
-            auto end = chrono::high_resolution_clock::now();
-            double dur_ms = chrono::duration<double, std::milli>(end - start).count();
-            t_omp_total += dur_ms;
-            cout << fixed << setprecision(2) << dur_ms << " ms\n";
-        }
-        t_omp_total /= total_runs;
-        cout << "  [CPU OpenMP]     Media Final: " << fixed << setprecision(2) << t_omp_total << " ms\n\n";
-
-        // Alocação Device
-        float *d_A, *d_B, *d_C;
-        cudaMalloc(&d_A, bytes);
-        cudaMalloc(&d_B, bytes);
-        cudaMalloc(&d_C, bytes);
-
-        // Configuração da Grid/Block para a GPU
-        dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
-        dim3 blocksPerGrid((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
-
-        // AQUECIMENTO DA GPU
-        cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
-        multiplicaKernelNaive<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
-        cudaDeviceSynchronize();
-
-        // Eventos CUDA para Medições
-        cudaEvent_t start_h2d, stop_h2d;
-        cudaEvent_t start_kernel, stop_kernel;
-        cudaEvent_t start_d2h, stop_d2h;
-        cudaEventCreate(&start_h2d); cudaEventCreate(&stop_h2d);
-        cudaEventCreate(&start_kernel); cudaEventCreate(&stop_kernel);
-        cudaEventCreate(&start_d2h); cudaEventCreate(&stop_d2h);
-
-        // 3. BENCHMARK GPU CUDA NAIVE
-        float sum_naive_h2d = 0.0f, sum_naive_kernel = 0.0f, sum_naive_d2h = 0.0f;
-        cout << "  [GPU Naive]      Rodando " << total_runs << " execucoes:\n" << flush;
-        for (int r = 0; r < total_runs; r++) {
-            cout << "    -> Execucao " << (r + 1) << "/" << total_runs << "... " << flush;
-            
-            // H2D
-            cudaEventRecord(start_h2d);
-            cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
-            cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
-            cudaEventRecord(stop_h2d);
-
-            // Kernel
-            cudaEventRecord(start_kernel);
-            multiplicaKernelNaive<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
-            cudaEventRecord(stop_kernel);
-
-            // D2H
-            cudaEventRecord(start_d2h);
-            cudaMemcpy(h_C_gpu, d_C, bytes, cudaMemcpyDeviceToHost);
-            cudaEventRecord(stop_d2h);
-
-            cudaEventSynchronize(stop_d2h);
-
-            float t_h2d = 0.0f, t_kernel = 0.0f, t_d2h = 0.0f;
-            cudaEventElapsedTime(&t_h2d, start_h2d, stop_h2d);
-            cudaEventElapsedTime(&t_kernel, start_kernel, stop_kernel);
-            cudaEventElapsedTime(&t_d2h, start_d2h, stop_d2h);
-
-            sum_naive_h2d += t_h2d;
-            sum_naive_kernel += t_kernel;
-            sum_naive_d2h += t_d2h;
-            cout << fixed << setprecision(2) << (t_h2d + t_kernel + t_d2h) << " ms\n";
-        }
-        sum_naive_h2d /= total_runs;
-        sum_naive_kernel /= total_runs;
-        sum_naive_d2h /= total_runs;
-        float total_naive_time = sum_naive_h2d + sum_naive_kernel + sum_naive_d2h;
-        cout << "  [GPU Naive]      Media Final: " << total_naive_time << " ms (Kernel: " << sum_naive_kernel << " ms, H2D: " << sum_naive_h2d << " ms, D2H: " << sum_naive_d2h << " ms)\n\n";
-
-        // Validação da GPU Naive contra CPU
-        bool naive_valid = validarMatrizes(h_C_cpu, h_C_gpu, N);
-
-        // 4. BENCHMARK GPU CUDA TILED (OTIMIZADO)
-        float sum_tiled_h2d = 0.0f, sum_tiled_kernel = 0.0f, sum_tiled_d2h = 0.0f;
-        cout << "  [GPU Tiled]      Rodando " << total_runs << " execucoes:\n" << flush;
-        for (int r = 0; r < total_runs; r++) {
-            cout << "    -> Execucao " << (r + 1) << "/" << total_runs << "... " << flush;
-            
-            // H2D
-            cudaEventRecord(start_h2d);
-            cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
-            cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
-            cudaEventRecord(stop_h2d);
-
-            // Kernel
-            cudaEventRecord(start_kernel);
-            multiplicaKernelTiled<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
-            cudaEventRecord(stop_kernel);
-
-            // D2H
-            cudaEventRecord(start_d2h);
-            cudaMemcpy(h_C_gpu, d_C, bytes, cudaMemcpyDeviceToHost);
-            cudaEventRecord(stop_d2h);
-
-            cudaEventSynchronize(stop_d2h);
-
-            float t_h2d = 0.0f, t_kernel = 0.0f, t_d2h = 0.0f;
-            cudaEventElapsedTime(&t_h2d, start_h2d, stop_h2d);
-            cudaEventElapsedTime(&t_kernel, start_kernel, stop_kernel);
-            cudaEventElapsedTime(&t_d2h, start_d2h, stop_d2h);
-
-            sum_tiled_h2d += t_h2d;
-            sum_tiled_kernel += t_kernel;
-            sum_tiled_d2h += t_d2h;
-            cout << fixed << setprecision(2) << (t_h2d + t_kernel + t_d2h) << " ms\n";
-        }
-        sum_tiled_h2d /= total_runs;
-        sum_tiled_kernel /= total_runs;
-        sum_tiled_d2h /= total_runs;
-        float total_tiled_time = sum_tiled_h2d + sum_tiled_kernel + sum_tiled_d2h;
-        cout << "  [GPU Tiled]      Media Final: " << total_tiled_time << " ms (Kernel: " << sum_tiled_kernel << " ms, H2D: " << sum_tiled_h2d << " ms, D2H: " << sum_tiled_d2h << " ms)\n\n";
-
-        // Validação da GPU Tiled contra CPU
-        bool tiled_valid = validarMatrizes(h_C_cpu, h_C_gpu, N);
-
-        bool validacao_geral = naive_valid && tiled_valid;
-        if (validacao_geral) {
-            cout << "  [Validacao]      PASSOU com sucesso!\n";
-        } else {
-            cout << "  [Validacao]      FALHOU! Os dados estao incorretos.\n";
+        // --- Benchmark de CPU ---
+        if (mode == "all" || mode == "cpu") {
+            int runs_cpu = rodadasCPU(N, total_runs);
+            runCPUBenchmark(N, runs_cpu, res, h_A, h_B, h_C);
         }
 
-        // Armazenamento
-        ResResultados res = {
-            N,
-            t_seq_total,
-            t_omp_total,
-            sum_naive_h2d,
-            sum_naive_kernel,
-            sum_naive_d2h,
-            total_naive_time,
-            sum_tiled_h2d,
-            sum_tiled_kernel,
-            sum_tiled_d2h,
-            total_tiled_time,
-            validacao_geral
-        };
+        // --- Benchmark de GPU ---
+        if (mode == "all" || mode == "gpu") {
+            // No modo apenas GPU, gera referência de validação via OpenMP (rápido)
+            if (validation && mode == "gpu") {
+                cout << "  [Validacao]      Gerando referencia CPU (OpenMP)... " << flush;
+                memset(h_C, 0, bytes);
+                multiplicaOpenMP(h_A, h_B, h_C, N);
+                cout << "Pronto.\n";
+            }
+            // No modo "all", a última execução do benchmark de CPU deixou h_C com resultado válido
+            runGPUBenchmark(N, total_runs, res, h_A, h_B,
+                            (validation ? h_C : nullptr), validation);
+        }
+
         resultados.push_back(res);
 
-        // Desalocação
-        cudaEventDestroy(start_h2d); cudaEventDestroy(stop_h2d);
-        cudaEventDestroy(start_kernel); cudaEventDestroy(stop_kernel);
-        cudaEventDestroy(start_d2h); cudaEventDestroy(stop_d2h);
-        cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
-        delete[] h_A; delete[] h_B; delete[] h_C_cpu; delete[] h_C_gpu;
-        
+        cudaFreeHost(h_A);
+        cudaFreeHost(h_B);
+        delete[] h_C;
+
         cout << "-------------------------------------------------------------------------\n\n";
     }
 
-    // APRESENTAÇÃO DE DADOS
-    cout << "=========================================================================================================\n";
-    cout << "                                  TABELA RESUMO DO BENCHMARK (TEMPOS EM MS)\n";
-    cout << "=========================================================================================================\n";
-    cout << "   N   | CPU Seq  | CPU OMP  | GPU Naive (Kernel/PCIe)      | GPU Tiled (Kernel/PCIe)      | Validacao\n";
-    cout << "-------+----------+----------+------------------------------+------------------------------+-------------\n";
+    // ============================================================
+    // TABELA RESUMO NO CONSOLE
+    // ============================================================
+    cout << "\n"
+         << "=======================================================================================================================================\n"
+         << "                                              TABELA RESUMO DO BENCHMARK (TEMPOS EM MS)\n"
+         << "=======================================================================================================================================\n"
+         << "   N   | CPU Seq    | CPU OMP    | CPU AVX2   | GPU Naive (Kernel / PCIe)     | GPU Tiled (Kernel / PCIe)     | Valido\n"
+         << "-------+------------+------------+------------+-------------------------------+-------------------------------+--------\n";
+
     for (auto const &r : resultados) {
+        auto fmt_cpu = [](double v) -> string {
+            if (v <= 0.0) return "  N/A     ";
+            // Formata para caber em 10 chars: ex "  257.13 ms"
+            char buf[32];
+            if (v >= 1000.0)
+                snprintf(buf, sizeof(buf), "%7.0f ms", v);
+            else
+                snprintf(buf, sizeof(buf), "%7.2f ms", v);
+            return buf;
+        };
+
         cout << setw(6) << r.N << " | "
-             << setw(6) << (int)r.t_cpu_seq << " ms | "
-             << setw(6) << (int)r.t_cpu_omp << " ms | "
-             << setw(6) << fixed << setprecision(1) << r.t_gpu_naive_total << " ms ("
-             << setprecision(1) << r.t_gpu_naive_kernel << "/" << (r.t_gpu_naive_h2d + r.t_gpu_naive_d2h) << ") | "
-             << setw(6) << fixed << setprecision(1) << r.t_gpu_tiled_total << " ms ("
-             << setprecision(1) << r.t_gpu_tiled_kernel << "/" << (r.t_gpu_tiled_h2d + r.t_gpu_tiled_d2h) << ") | "
+             << fmt_cpu(r.t_cpu_seq)    << " | "
+             << fmt_cpu(r.t_cpu_omp)    << " | "
+             << fmt_cpu(r.t_cpu_manual) << " | "
+             << fixed << setprecision(2)
+             << setw(8) << r.t_gpu_naive_total << " ms ("
+             << setw(7) << r.t_gpu_naive_kernel << " / "
+             << setw(5) << (r.t_gpu_naive_h2d + r.t_gpu_naive_d2h) << ") | "
+             << setw(8) << r.t_gpu_tiled_total << " ms ("
+             << setw(7) << r.t_gpu_tiled_kernel << " / "
+             << setw(5) << (r.t_gpu_tiled_h2d + r.t_gpu_tiled_d2h) << ") | "
              << (r.validacao_ok ? "SUCESSO" : "FALHA") << "\n";
     }
-    cout << "=========================================================================================================\n";
-    cout << "Legenda: Tempos indicados como Total (Kernel / PCIe Transferências H2D+D2H)\n\n";
+    cout << "=======================================================================================================================================\n"
+         << "Legenda: GPU = Total (Kernel puro / PCIe H2D+D2H)  |  N/A = teste pulado\n\n";
 
+    // ============================================================
     // EXPORTAÇÃO CSV
-    string csv_filename = "benchmarks.csv";
-    ofstream csv(csv_filename);
-    csv << "N,CPU_Seq_ms,CPU_OMP_ms,GPU_Naive_H2D_ms,GPU_Naive_Kernel_ms,GPU_Naive_D2H_ms,GPU_Naive_Total_ms,GPU_Tiled_H2D_ms,GPU_Tiled_Kernel_ms,GPU_Tiled_D2H_ms,GPU_Tiled_Total_ms,Valido\n";
+    // ============================================================
+    const string csv_file = "benchmarks.csv";
+    ofstream csv(csv_file);
+    csv << "N,CPU_Seq_ms,CPU_OMP_ms,CPU_Manual_ms,"
+        << "GPU_Naive_H2D_ms,GPU_Naive_Kernel_ms,GPU_Naive_D2H_ms,GPU_Naive_Total_ms,"
+        << "GPU_Tiled_H2D_ms,GPU_Tiled_Kernel_ms,GPU_Tiled_D2H_ms,GPU_Tiled_Total_ms,"
+        << "Valido\n";
     for (auto const &r : resultados) {
-        csv << r.N << ","
-            << r.t_cpu_seq << ","
-            << r.t_cpu_omp << ","
-            << r.t_gpu_naive_h2d << ","
+        csv << r.N              << ","
+            << r.t_cpu_seq      << ","
+            << r.t_cpu_omp      << ","
+            << r.t_cpu_manual   << ","
+            << r.t_gpu_naive_h2d    << ","
             << r.t_gpu_naive_kernel << ","
-            << r.t_gpu_naive_d2h << ","
-            << r.t_gpu_naive_total << ","
-            << r.t_gpu_tiled_h2d << ","
+            << r.t_gpu_naive_d2h    << ","
+            << r.t_gpu_naive_total  << ","
+            << r.t_gpu_tiled_h2d    << ","
             << r.t_gpu_tiled_kernel << ","
-            << r.t_gpu_tiled_d2h << ","
-            << r.t_gpu_tiled_total << ","
+            << r.t_gpu_tiled_d2h    << ","
+            << r.t_gpu_tiled_total  << ","
             << (r.validacao_ok ? "1" : "0") << "\n";
     }
     csv.close();
-    cout << ">>> Resultados do benchmark exportados com sucesso para o arquivo '" << csv_filename << "'!\n";
-    cout << "=========================================================================\n";
+    cout << ">>> CSV exportado para '" << csv_file << "' com sucesso!\n"
+         << "=========================================================================\n";
 
     return 0;
 }

@@ -9,11 +9,12 @@
 
 ## 📌 Sobre o Projeto
 
-Este projeto apresenta um estudo comparativo e experimental de desempenho entre a execução sequencial na CPU, o paralelismo multithreaded na CPU (OpenMP) e a aceleração paralela massiva na GPU (NVIDIA CUDA C++) para a **multiplicação de matrizes de grande escala** ($N \times N$, variando de $100 \times 100$ até $10.000 \times 10.000$).
+Este projeto apresenta um estudo comparativo e experimental de desempenho entre a execução sequencial na CPU, o paralelismo multithreaded na CPU (OpenMP e AVX2 Manual) e a aceleração paralela massiva na GPU (NVIDIA CUDA C++) para a **multiplicação de matrizes de grande escala** ($N \times N$, variando de $100 \times 100$ até $10.000 \times 10.000$).
 
-O foco principal do estudo é analisar como as diferenças microarquiteturais das plataformas determinam sua eficiência. Investigamos dois tópicos centrais de Arquitetura de Computadores:
+O foco principal do estudo é analisar como as diferenças microarquiteturais das plataformas determinam sua eficiência. Investigamos três tópicos centrais de Arquitetura de Computadores:
 1. **O Gargalo do Barramento PCIe**: A latência de inicialização e transferência física de dados (*Host-to-Device* e *Device-to-Host*) comparada ao tempo computacional do kernel, demonstrando na prática a transição entre regimes de limitação de banda de memória (*Memory-Bound*) e limitação de poder de computação (*Compute-Bound*).
 2. **Hierarquia de Memória na GPU**: O ganho de desempenho obtido ao mitigar acessos repetitivos à memória global (VRAM) por meio da técnica de **Shared Memory Tiling** (reúso de dados local em cache L1/SRAM interno).
+3. **Vetorização SIMD na CPU**: O impacto das instruções AVX2 (256-bit) combinadas com `std::thread` em comparação ao paralelismo gerenciado pelo compilador via OpenMP.
 
 ---
 
@@ -29,17 +30,20 @@ A metodologia científica adotada baseia-se em execuções de testes em dois amb
 ## 📂 Estrutura do Repositório
 
 ```text
-├── cpu/
-│   ├── sequencial.h       # Declaração do algoritmo sequencial
-│   ├── sequencial.cpp     # Implementação i-k-j otimizada para cache da CPU
-│   ├── openmp.h           # Declaração do algoritmo paralelo em CPU
-│   └── openmp.cpp         # Implementação paralela com diretivas OpenMP e SIMD
-├── gpu/
-│   ├── kernels.h          # Cabeçalho dos Kernels CUDA (Naive & Tiled)
-│   ├── kernels.cu         # Implementação física dos Kernels CUDA
-│   └── main.cu            # Driver de benchmark unificado (10 rodadas e estatísticas)
-├── plot_benchmarks.py     # Script em Python para geração automática dos gráficos
-├── benchmarks.csv         # Tabela de saída contendo a coleta de todas as rodadas
+├── common.h               # Struct ResResultados compartilhada entre CPU e GPU
+├── cpu/                   # Módulo de CPU — Autor: Arthur Iwankiu Castro
+│   ├── sequencial.h / .cpp    # Algoritmo sequencial i-k-j (cache-friendly)
+│   ├── openmp.h / .cpp        # Algoritmo paralelo com OpenMP + SIMD
+│   ├── manual.h / .cpp        # Algoritmo manual: AVX2 (256-bit) + std::thread
+│   ├── cpu_benchmark.h        # Declaração do driver de benchmark de CPU
+│   └── cpu_benchmark.cpp      # Implementação do benchmark de CPU (Seq, OMP, AVX2)
+├── gpu/                   # Módulo de GPU — Autor: Enzo da Silva Passos
+│   ├── kernels.h / .cu        # Kernels CUDA: Naive (VRAM global) e Tiled (Shared Memory)
+│   ├── gpu_benchmark.h        # Declaração do driver de benchmark de GPU
+│   ├── gpu_benchmark.cu       # Implementação do benchmark de GPU (CUDA Events + cooldown)
+│   └── main.cu                # Orquestrador principal: CLI, hardware, CSV
+├── plot_benchmarks.py     # Script Python para geração automática dos gráficos
+├── benchmarks.csv         # Tabela de saída contendo as médias de todos os testes
 └── README.md              # Documentação principal
 ```
 
@@ -47,37 +51,63 @@ A metodologia científica adotada baseia-se em execuções de testes em dois amb
 
 ## 🚀 Como Compilar e Executar
 
-O driver de benchmark unificado em `gpu/main.cu` gerencia a inicialização determinística das matrizes, a execução de **10 rodadas completas de computação para cada tamanho $N$ e paradigma**, a validação de tolerância a precisão de ponto flutuante (`1e-2f`) e a exportação das médias de tempo em CSV.
-
 ### 1. Compilação (Windows PowerShell)
-Para compilar todas as fontes modularizadas simultaneamente com suporte ao CUDA (NVCC) e ao OpenMP experimental do MSVC (Visual Studio), execute o seguinte comando no PowerShell:
+
+Utilize o **NVCC** com suporte ao compilador MSVC do Visual Studio, habilitando OpenMP e instruções AVX2:
 
 ```powershell
-cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat`" && nvcc -O3 -Xcompiler /openmp:experimental gpu/main.cu gpu/kernels.cu cpu/sequencial.cpp cpu/openmp.cpp -o gpuxcpu.exe"
+cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat`" && nvcc -O3 -Xcompiler `"/openmp:experimental /arch:AVX2`" gpu/main.cu gpu/gpu_benchmark.cu gpu/kernels.cu cpu/sequencial.cpp cpu/openmp.cpp cpu/manual.cpp cpu/cpu_benchmark.cpp -o gpuxcpu.exe"
 ```
 
-*Nota: Se o caminho do Visual Studio for diferente no seu sistema, certifique-se de ajustar o diretório correspondente ao arquivo `vcvars64.bat`.*
+*Nota: ajuste o caminho do `vcvars64.bat` se sua versão do Visual Studio for diferente.*
 
 ### 2. Execução do Benchmark
-Inicie a bateria de benchmarks executando o binário compilado:
+
+O binário aceita argumentos de linha de comando para controle total da bateria de testes:
+
 ```powershell
+# Benchmark completo (CPU + GPU, todos os tamanhos, 10 rodadas na GPU)
 ./gpuxcpu.exe
+
+# Apenas GPU (ideal para coletar dados rápido)
+./gpuxcpu.exe --mode gpu
+
+# Apenas CPU (útil para o PC do Arthur sem GPU dedicada)
+./gpuxcpu.exe --mode cpu
+
+# Customizar tamanhos e número de rodadas
+./gpuxcpu.exe --mode all --sizes 500,1000,2000,5000 --runs 5
+
+# Incluir N=10000 na CPU sequencial (pode demorar ~5 min)
+./gpuxcpu.exe --max-seq-size 10000
+
+# Ver todas as opções
+./gpuxcpu.exe --help
 ```
 
-O console exibirá um contador de progresso detalhado rodada a rodada (essencial para acompanhar a execução cúbica da CPU Sequencial nos tamanhos de $N \ge 5000$). No fim do benchmark, a tabela de resultados consolidados será impressa e os dados serão salvos em `benchmarks.csv`.
+#### Opções disponíveis
+
+| Opção | Descrição | Padrão |
+|---|---|---|
+| `--mode <all\|cpu\|gpu>` | Módulos a executar | `all` |
+| `--sizes <n1,n2,...>` | Tamanhos $N$ das matrizes | `100,200,500,1000,2000,5000,10000` |
+| `--runs <n>` | Repetições por teste (GPU e CPU pequenos) | `10` |
+| `--max-seq-size <n>` | Limite de N para CPU Sequencial | `5000` |
+| `--no-validation` | Desabilita validação GPU vs CPU | validação ativa |
+
+> **Nota sobre tempo de execução:** O benchmark completo com os padrões foi projetado para terminar em **menos de 30 minutos**. A CPU Sequencial é automaticamente pulada para $N > 5000$ (configure com `--max-seq-size` se necessário). Rodadas de GPU para $N \ge 2000$ incluem um **cooldown térmico automático** entre execuções para garantir leituras estáveis sem throttling.
 
 ---
 
 ## 📊 Geração dos Gráficos Acadêmicos (Python)
 
-Criamos o script `plot_benchmarks.py` para automatizar a renderização de gráficos em alta resolução científica (300 DPI, prontos para inclusão em artigos). O script consome o arquivo `benchmarks.csv` gerado e plota:
+O script `plot_benchmarks.py` consome o arquivo `benchmarks.csv` e gera três gráficos em alta resolução (300 DPI):
 
-1. **`tempo_execucao.png`**: Curva de escalonamento dos tempos (CPU Seq, CPU OMP, GPU Naive e GPU Tiled) em escala Logarítmica bidirecional.
-2. **`speedup.png`**: Gráfico demonstrando o ganho de aceleração das versões paralelas e aceleradas em relação à CPU Sequencial base.
-3. **`gargalo_pcie.png`**: Gráfico de barras empilhadas que decompõe a distribuição percentual do tempo total da GPU Tiled entre **Transferência de dados via PCIe (H2D + D2H)** e **Computação Pura do Kernel**.
+1. **`tempo_execucao.png`**: Curva de escalonamento de todos os paradigmas em escala logarítmica bidirecional.
+2. **`speedup.png`**: Fator de aceleração de cada versão paralela em relação à CPU Sequencial base.
+3. **`gargalo_pcie.png`**: Decomposição percentual do tempo da GPU Tiled entre computação do kernel e transferência PCIe.
 
-### Como Rodar a Plotagem:
-Instale as dependências padrão do ecossistema científico e execute o script:
+### Como executar:
 ```powershell
 pip install pandas matplotlib numpy
 python plot_benchmarks.py
@@ -87,24 +117,29 @@ python plot_benchmarks.py
 
 ## 📈 Exemplo Prático de Resultados Coletados
 
-Abaixo estão os resultados consolidados coletados experimentalmente na máquina de testes:
+Abaixo estão os resultados consolidados coletados experimentalmente na máquina de testes (PC 1: Ryzen 5 5600 + RTX 3080):
 
-| Tamanho $N$ | CPU Sequencial | CPU OpenMP | GPU Naive (Kernel / PCIe) | GPU Tiled (Kernel / PCIe) | Speedup GPU Tiled vs CPU OMP | Validação |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **100** | 0.24 ms | 0.22 ms | 0.10 ms (0.01 / 0.08) ms | 0.09 ms (0.02 / 0.08) ms | **2.44x** | SUCESSO |
-| **200** | 2.02 ms | 1.05 ms | 0.23 ms (0.06 / 0.18) ms | 0.13 ms (0.03 / 0.11) ms | **8.07x** | SUCESSO |
-| **500** | 35.53 ms | 15.03 ms | 0.56 ms (0.20 / 0.36) ms | 0.50 ms (0.17 / 0.33) ms | **30.06x** | SUCESSO |
-| **1000** | 257.13 ms | 145.43 ms | 2.26 ms (1.21 / 1.05) ms | 1.95 ms (0.99 / 0.96) ms | **74.57x** | SUCESSO |
-| **2000** | 2033.04 ms | 959.30 ms | 16.78 ms (10.91 / 5.87) ms | 12.17 ms (6.77 / 5.41) ms | **78.82x** | SUCESSO |
-| **5000** | 15.61 s | 15.60 s | 155.68 ms (124.40 / 31.28) ms | 124.31 ms (96.62 / 27.69) ms | **125.55x** | SUCESSO |
-| **10000** | 177.57 s | 177.57 s | 1178.65 ms (1074.41 / 104.24) ms | 884.81 ms (772.36 / 112.45) ms | **200.68x** | SUCESSO |
+| Tamanho $N$ | CPU Sequencial | CPU OpenMP | CPU AVX2 | GPU Naive (Kernel / PCIe) | GPU Tiled (Kernel / PCIe) | Speedup Tiled vs Seq | Validação |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **100** | 0.48 ms | 0.45 ms | 0.93 ms | 0.28 ms (0.05 / 0.22) | 0.31 ms (0.10 / 0.22) | 1.5x | SUCESSO |
+| **500** | 45 ms | 19 ms | 3.7 ms | 0.37 ms (0.17 / 0.20) | 0.33 ms (0.14 / 0.19) | 136x | SUCESSO |
+| **1000** | 258 ms | 121 ms | 23 ms | 1.85 ms (1.28 / 0.56) | 1.57 ms (0.99 / 0.58) | 164x | SUCESSO |
+| **2000** | 2109 ms | 846 ms | 110 ms | 11.3 ms (9.3 / 2.0) | 8.7 ms (6.8 / 1.9) | 242x | SUCESSO |
+| **5000** | 39154 ms | 15624 ms | 4646 ms | 160.8 ms | 134.8 ms | 290x | SUCESSO |
+| **10000** | N/A* | — | — | 2186 ms | 2543 ms** | — | SUCESSO |
+
+*\* CPU Sequencial para N=10.000 ultrapassaria 5 minutos e é pulada por padrão.*  
+*\*\* Resultado de coleta com throttling térmico detectado; coleta com cooldown habilitado corrige este valor.*
 
 ---
 
 ## 🔍 Conclusões e Análise Teórica (Arquitetura)
 
 ### 1. Curva de Transição do Gargalo PCIe
-O benchmark valida experimentalmente o modelo teórico de **Intensidade Aritmética**. Com matrizes pequenas ($N = 100$), a cópia física via barramento PCIe consome cerca de **88.8%** de todo o tempo da execução na GPU, devido à latência fixa associada a drivers e preparação de canais DMA. Com matrizes de grande escala ($N = 10.000$), a complexidade de processamento $O(N^3)$ domina amplamente sobre a cópia $O(N^2)$, e o overhead do barramento cai para insignificantes **12.7%**, abrindo espaço para um speedup massivo de **200.7x** sobre a execução paralelizada na CPU.
+O benchmark valida experimentalmente o modelo teórico de **Intensidade Aritmética**. Com matrizes pequenas ($N = 100$), a cópia física via barramento PCIe consome a maior parte do tempo total da execução na GPU, devido à latência fixa de drivers e canais DMA. Com matrizes de grande escala, a complexidade de processamento $O(N^3)$ domina sobre a cópia $O(N^2)$, e o overhead do barramento torna-se insignificante — abrindo espaço para speedups massivos.
 
 ### 2. A Hierarquia de Memória (Shared Memory Tiling)
-O kernel `multiplicaKernelTiled` provou o enorme impacto de otimizar acessos à memória de vídeo. Ao realizar o carregamento cooperativo de dados em blocos compartilhados na SRAM local (rápida como cache L1 da GPU), a necessidade de leituras redundantes na VRAM global cai por um fator de 16x (com base no bloco de $16 \times 16$). O resultado foi uma **redução direta de 28.1% no tempo de computação de kernel** para $N=10.000$ (de 1074.41 ms para 772.36 ms).
+O kernel `multiplicaKernelTiled` demonstra o impacto de otimizar acessos à memória de vídeo. Ao realizar o carregamento cooperativo de dados em blocos compartilhados na SRAM local (equivalente ao cache L1 da GPU), a necessidade de leituras redundantes na VRAM global cai por um fator de 16x (com base no bloco de $16 \times 16$), resultando em redução direta no tempo de computação do kernel.
+
+### 3. Vetorização SIMD (AVX2) vs OpenMP
+A implementação manual com AVX2 demonstra ganhos significativos em relação ao OpenMP padrão, processando 8 floats por instrução com FMA (`_mm256_fmadd_ps`), evidenciando a importância da exploração explícita das unidades de execução vetorial disponíveis na arquitetura Zen 3.
