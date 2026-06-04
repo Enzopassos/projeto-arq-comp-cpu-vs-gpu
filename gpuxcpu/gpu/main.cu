@@ -1,7 +1,3 @@
-// main.cu
-// Orquestrador principal do benchmark CPU vs GPU.
-// Responsável por: parse de argumentos, detecção de hardware, alocação de memória,
-// coordenação das baterias de testes e exportação dos resultados em CSV.
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -15,13 +11,9 @@
 #include "../common.h"
 #include "gpu_benchmark.h"
 #include "../cpu/cpu_benchmark.h"
-#include "../cpu/openmp.h"  // Para geração da referência de validação no modo --mode gpu
+#include "../cpu/openmp.h"
 
 using namespace std;
-
-// ============================================================
-// Detecção de Hardware
-// ============================================================
 
 static string obterModeloCPU() {
     int info[4] = {};
@@ -34,10 +26,24 @@ static string obterModeloCPU() {
     return (p != string::npos) ? s.substr(p) : s;
 }
 
-// ============================================================
+static string sanitizarNome(string s) {
+    string r = "";
+    for (char c : s) {
+        if (isalnum((unsigned char)c)) {
+            r += c;
+        } else if (c == ' ' || c == '_' || c == '-') {
+            if (!r.empty() && r.back() != '_') {
+                r += '_';
+            }
+        }
+    }
+    while (!r.empty() && r.back() == '_') {
+        r.pop_back();
+    }
+    return r;
+}
+
 // Inicialização das matrizes com valores determinísticos
-// (garante reprodutibilidade entre execuções)
-// ============================================================
 static void inicializarMatrizes(float *A, float *B, int N) {
     for (int i = 0; i < N * N; i++) {
         A[i] = (float)(i % 100) / 100.0f + 0.5f;
@@ -45,32 +51,22 @@ static void inicializarMatrizes(float *A, float *B, int N) {
     }
 }
 
-// ============================================================
-// Calcula número de rodadas da CPU de acordo com o tamanho N
-// para garantir que o benchmark caiba em ~30 minutos.
-// ============================================================
 static int rodadasCPU(int N, int default_runs) {
-    if (N <= 1000) return default_runs;
-    if (N <= 2000) return min(default_runs, 3);
-    return min(default_runs, 1); // N >= 5000: apenas 1 rodada
+    return default_runs; 
 }
 
-// ============================================================
-// main
-// ============================================================
 int main(int argc, char *argv[]) {
-    // --- Parâmetros com valores padrão ---
     string mode        = "all";
     int    total_runs  = 10;
     bool   validation  = true;
+    string custom_output = "";
     vector<int> sizes  = {100, 200, 500, 1000, 2000, 5000, 10000};
-
-    // --- Parse de linha de comando ---
     for (int i = 1; i < argc; i++) {
         string a = argv[i];
         if      (a == "--mode"         && i+1 < argc) mode       = argv[++i];
         else if (a == "--runs"         && i+1 < argc) total_runs = stoi(argv[++i]);
         else if (a == "--no-validation")              validation  = false;
+        else if (a == "--out"          && i+1 < argc) custom_output = argv[++i];
         else if (a == "--sizes"        && i+1 < argc) {
             string tok = argv[++i];
             sizes.clear();
@@ -84,10 +80,11 @@ int main(int argc, char *argv[]) {
         else if (a == "--help" || a == "-h") {
             cout
                 << "Uso: " << argv[0] << " [opcoes]\n\n"
-                  << "  --mode <all|cpu|gpu>        Modo de execucao (padrao: all)\n"
+                << "  --mode <all|cpu|gpu>        Modo de execucao (padrao: all)\n"
                 << "  --sizes <n1,n2,...>          Tamanhos N das matrizes (padrao: 100,200,500,1000,2000,5000,10000)\n"
                 << "  --runs <n>                   Repeticoes por teste (padrao: 10, reduzido automaticamente para N grande)\n"
                 << "  --no-validation              Desabilita validacao matematica GPU vs CPU\n"
+                << "  --out <sufixo>               Sufixo personalizado para o arquivo CSV\n"
                 << "  -h, --help                   Mostra esta ajuda\n\n"
                 << "Exemplos:\n"
                 << "  " << argv[0] << "                           # Benchmark completo\n"
@@ -139,22 +136,20 @@ int main(int argc, char *argv[]) {
         res.N           = N;
         res.validacao_ok = true;
 
-        // --- Benchmark de CPU ---
+        // Benchmark de CPU
         if (mode == "all" || mode == "cpu") {
             int runs_cpu = rodadasCPU(N, total_runs);
             runCPUBenchmark(N, runs_cpu, res, h_A, h_B, h_C);
         }
 
-        // --- Benchmark de GPU ---
+        // Benchmark de GPU
         if (mode == "all" || mode == "gpu") {
-            // No modo apenas GPU, gera referência de validação via OpenMP (rápido)
             if (validation && mode == "gpu") {
                 cout << "  [Validacao]      Gerando referencia CPU (OpenMP)... " << flush;
                 memset(h_C, 0, bytes);
                 multiplicaOpenMP(h_A, h_B, h_C, N);
                 cout << "Pronto.\n";
             }
-            // No modo "all", a última execução do benchmark de CPU deixou h_C com resultado válido
             runGPUBenchmark(N, total_runs, res, h_A, h_B,
                             (validation ? h_C : nullptr), validation);
         }
@@ -168,9 +163,7 @@ int main(int argc, char *argv[]) {
         cout << "-------------------------------------------------------------------------\n\n";
     }
 
-    // ============================================================
     // TABELA RESUMO NO CONSOLE
-    // ============================================================
     cout << "\n"
          << "=======================================================================================================================================\n"
          << "                                              TABELA RESUMO DO BENCHMARK (TEMPOS EM MS)\n"
@@ -181,7 +174,6 @@ int main(int argc, char *argv[]) {
     for (auto const &r : resultados) {
         auto fmt_cpu = [](double v) -> string {
             if (v <= 0.0) return "  N/A     ";
-            // Formata para caber em 10 chars: ex "  257.13 ms"
             char buf[32];
             if (v >= 1000.0)
                 snprintf(buf, sizeof(buf), "%7.0f ms", v);
@@ -206,10 +198,15 @@ int main(int argc, char *argv[]) {
     cout << "=======================================================================================================================================\n"
          << "Legenda: GPU = Total (Kernel puro / PCIe H2D+D2H)  |  N/A = teste pulado\n\n";
 
-    // ============================================================
-    // EXPORTAÇÃO CSV
-    // ============================================================
-    const string csv_file = "benchmarks.csv";
+    //EXPORTAÇÃO CSV
+    string csv_file = "benchmarks.csv";
+    if (!custom_output.empty()) {
+        csv_file = "benchmarks_" + custom_output + ".csv";
+    } else {
+        string s_cpu = sanitizarNome(cpu_name);
+        string s_gpu = sanitizarNome(gpu_name);
+        csv_file = "benchmarks_" + s_cpu + "_" + s_gpu + ".csv";
+    }
     ofstream csv(csv_file);
     csv << "N,CPU_Seq_ms,CPU_OMP_ms,CPU_Manual_ms,"
         << "GPU_Naive_H2D_ms,GPU_Naive_Kernel_ms,GPU_Naive_D2H_ms,GPU_Naive_Total_ms,"

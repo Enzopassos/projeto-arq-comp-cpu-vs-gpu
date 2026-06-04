@@ -22,15 +22,10 @@ void runCPUBenchmark(int N, int runs,
 
     // ==========================================
     // 1. CPU SEQUENCIAL
-    // Sempre executa pelo menos 1 rodada, independente do tamanho N.
-    // Para N grande, o caller já passa runs=1 via rodadasCPU().
     // ==========================================
     {
         double t_total = 0.0;
-        cout << "  [CPU Sequencial] Rodando " << runs << " execucao(oes)";
-        if (runs == 1 && N >= 5000)
-            cout << " (N grande: 1 rodada para controle de tempo)";
-        cout << ":\n" << flush;
+        cout << "  [CPU Sequencial] Rodando " << runs << " execucao(oes):\n" << flush;
         for (int r = 0; r < runs; r++) {
             cout << "    -> Execucao " << (r + 1) << "/" << runs << "... " << flush;
 

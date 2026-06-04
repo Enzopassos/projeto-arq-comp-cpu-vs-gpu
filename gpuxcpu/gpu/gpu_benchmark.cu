@@ -12,7 +12,6 @@
 #include <cstring>
 #include <cuda_runtime.h>
 
-// Windows Sleep para cooldown térmico entre rodadas
 #ifdef _WIN32
 #include <windows.h>
 #define SLEEP_MS(ms) Sleep(ms)
@@ -23,11 +22,6 @@
 
 using namespace std;
 
-// ============================================================
-// Utilitários internos
-// ============================================================
-
-// Nome da GPU detectada (armazenado estaticamente após primeira chamada)
 static char s_gpu_name[256] = "GPU NVIDIA Compativel";
 
 const char* obterModeloGPU() {
@@ -42,7 +36,7 @@ static bool validarMatrizes(const float *ref, const float *teste, int N) {
         float diff = fabsf(ref[i] - teste[i]);
         if (diff > max_diff) max_diff = diff;
     }
-    const float tolerancia = 1e-2f; // Tolerância segura para float32 em larga escala
+    const float tolerancia = 1e-2f;
     if (max_diff > tolerancia) {
         cout << "\n  [ERRO DE VALIDACAO] Diferenca maxima: " << max_diff << "\n";
         return false;
@@ -50,21 +44,15 @@ static bool validarMatrizes(const float *ref, const float *teste, int N) {
     return true;
 }
 
-// Determina o intervalo de cooldown (ms) entre rodadas para evitar throttling térmico.
-// Matrizes grandes geram calor significativo na GPU; um cooldown garante resultados estáveis.
+// Determina o intervalo de cooldown entre rodadas para evitar throttling térmico
 static int cooldownMs(int N) {
     if (N >= 10000) return 3000; // 3 segundos entre rodadas para N=10000
     if (N >= 5000)  return 1500; // 1.5 segundo para N=5000
     if (N >= 2000)  return 500;  // 0.5 segundo para N=2000
-    return 0;                    // Sem cooldown para matrizes pequenas
+    return 0;
 }
 
-// ============================================================
-// API pública
-// ============================================================
-
 void inicializarGPUDevice() {
-    // Força inicialização do contexto CUDA e lê propriedades da GPU
     cudaFree(0);
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess) {
@@ -77,30 +65,29 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
                      const float *h_C_ref, bool run_validation) {
     size_t bytes = N * N * sizeof(float);
 
-    // --- Alocação de memória no Device ---
+    // Alocação de memória no Device
     float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
     cudaMalloc(&d_A, bytes);
     cudaMalloc(&d_B, bytes);
     cudaMalloc(&d_C, bytes);
 
-    // --- Buffer de host para leitura do resultado (pinned para cópia rápida) ---
     float *h_C_gpu = nullptr;
     cudaMallocHost(&h_C_gpu, bytes);
 
-    // --- Configuração de Grid/Block ---
+    // Configuração de Grid/Block
     dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
     dim3 blocksPerGrid(
         (N + TILE_SIZE - 1) / TILE_SIZE,
         (N + TILE_SIZE - 1) / TILE_SIZE
     );
 
-    // --- Warm-up: garante que a GPU está em clock operacional antes das medições ---
+    // Warm-up
     cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
     multiplicaKernelNaive<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
     cudaDeviceSynchronize();
 
-    // --- Eventos CUDA para medição de tempo de alta precisão ---
+    // Eventos CUDA para medição de tempo
     cudaEvent_t ev_h2d_s, ev_h2d_e;
     cudaEvent_t ev_ker_s, ev_ker_e;
     cudaEvent_t ev_d2h_s, ev_d2h_e;
@@ -108,12 +95,9 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
     cudaEventCreate(&ev_ker_s); cudaEventCreate(&ev_ker_e);
     cudaEventCreate(&ev_d2h_s); cudaEventCreate(&ev_d2h_e);
 
-    int cd_ms = cooldownMs(N); // Intervalo de cooldown térmico para este N
+    int cd_ms = cooldownMs(N);
 
-    // ==========================================
-    // 1. BENCHMARK GPU KERNEL NAIVE
-    //    Cada thread acessa VRAM global diretamente (sem cache)
-    // ==========================================
+    // BENCHMARK GPU KERNEL NAIVE
     float sum_naive_h2d = 0.0f, sum_naive_ker = 0.0f, sum_naive_d2h = 0.0f;
     cout << "  [GPU Naive]      Rodando " << total_runs << " execucoes";
     if (cd_ms > 0) cout << " (cooldown " << cd_ms << "ms entre rodadas)";
@@ -167,10 +151,7 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
     bool naive_ok = true;
     if (run_validation) naive_ok = validarMatrizes(h_C_ref, h_C_gpu, N);
 
-    // ==========================================
-    // 2. BENCHMARK GPU KERNEL TILED (SHARED MEMORY)
-    //    Carrega tiles da VRAM em SRAM (cache L1 da GPU) para reutilização
-    // ==========================================
+    // BENCHMARK GPU KERNEL TILED
     float sum_tiled_h2d = 0.0f, sum_tiled_ker = 0.0f, sum_tiled_d2h = 0.0f;
     cout << "  [GPU Tiled]      Rodando " << total_runs << " execucoes";
     if (cd_ms > 0) cout << " (cooldown " << cd_ms << "ms entre rodadas)";
@@ -224,7 +205,7 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
     bool tiled_ok = true;
     if (run_validation) tiled_ok = validarMatrizes(h_C_ref, h_C_gpu, N);
 
-    // --- Resultado de Validação ---
+    // Resultado de Validação
     res.validacao_ok = naive_ok && tiled_ok;
     if (run_validation && h_C_ref != nullptr) {
         if (res.validacao_ok)
@@ -233,7 +214,7 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
             cout << "  [Validacao GPU]  FALHOU! Os dados da GPU divergem da CPU.\n";
     }
 
-    // --- Preenchimento dos resultados ---
+    // Preenchimento dos resultados
     res.t_gpu_naive_h2d    = sum_naive_h2d;
     res.t_gpu_naive_kernel = sum_naive_ker;
     res.t_gpu_naive_d2h    = sum_naive_d2h;
@@ -244,7 +225,6 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
     res.t_gpu_tiled_d2h    = sum_tiled_d2h;
     res.t_gpu_tiled_total  = tiled_total;
 
-    // --- Desalocação ---
     cudaEventDestroy(ev_h2d_s); cudaEventDestroy(ev_h2d_e);
     cudaEventDestroy(ev_ker_s);  cudaEventDestroy(ev_ker_e);
     cudaEventDestroy(ev_d2h_s); cudaEventDestroy(ev_d2h_e);
