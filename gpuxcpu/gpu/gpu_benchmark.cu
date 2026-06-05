@@ -44,6 +44,8 @@ static bool validarMatrizes(const float *ref, const float *teste, int N) {
     return true;
 }
 
+
+
 // Determina o intervalo de cooldown entre rodadas para evitar throttling térmico
 static int cooldownMs(int N) {
     if (N >= 10000) return 3000; // 3 segundos entre rodadas para N=10000
@@ -82,10 +84,21 @@ void runGPUBenchmark(int N, int total_runs, ResResultados &res,
     );
 
     // Warm-up
-    cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
+    cudaError_t err_mem1 = cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
+    cudaError_t err_mem2 = cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
+    if (err_mem1 != cudaSuccess || err_mem2 != cudaSuccess) {
+        cout << "\n  [CUDA ERROR HostToDevice]: " << cudaGetErrorString(err_mem1) << " / " << cudaGetErrorString(err_mem2) << "\n";
+    }
     multiplicaKernelNaive<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
-    cudaDeviceSynchronize();
+    cudaError_t err_launch = cudaGetLastError();
+    if (err_launch != cudaSuccess) {
+        cout << "\n  [CUDA ERROR Warm-up Kernel Launch]: " << cudaGetErrorString(err_launch) << "\n";
+    }
+    cudaError_t err_sync = cudaDeviceSynchronize();
+    if (err_sync != cudaSuccess) {
+        cout << "\n  [CUDA ERROR Warm-up Kernel Sync]: " << cudaGetErrorString(err_sync) << "\n";
+    }
+
 
     // Eventos CUDA para medição de tempo
     cudaEvent_t ev_h2d_s, ev_h2d_e;
