@@ -9,7 +9,7 @@
 using namespace std;
 
 int main() {
-    int N = 1000;
+    int N = 5000;
 
     // Alocação de memória no Heap
     float *A = new float[N * N];
@@ -68,6 +68,7 @@ int main() {
         // ---- EXECUÇÃO THREADS MANUAIS ----
         int num_threads = std::thread::hardware_concurrency(); 
         if (num_threads == 0) num_threads = 8;
+        // ---- GARANTE QUE TENHA NO MAX 12 THREADS SIMULTANEAS
 
         // As threads já zeram a matriz C dentro delas (First Touch Policy)
         cout << "[Info] Iniciando Warm-up (Aquecimento de Cache)...\n";
