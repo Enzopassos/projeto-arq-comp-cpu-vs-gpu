@@ -58,7 +58,7 @@ static int rodadasCPU(int N, int default_runs) { return default_runs; }
 
 int main(int argc, char *argv[]) {
   string mode = "all";
-  int total_runs = 1;
+  int total_runs = 10;
   bool validation = true;
   string custom_output = "";
   vector<int> sizes = {100, 200, 500, 1000, 2000, 5000, 10000};
